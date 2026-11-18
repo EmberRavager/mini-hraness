@@ -22,3 +22,11 @@
 默认入口通过 stdio 完成 MCP 握手，从 `tools/list` 取得工具名与输入 Schema，再通过 `tools/call` 执行配置允许的调用。MCP 子进程以产物目录为工作目录，启动时传入空环境映射。主助手用 `write_file` 写入真实文件，子助手只能列目录、读文本；搜索服务仅在开启联网的轮次连接。两个服务均由外部 Node 启动。搜索入口 `external-tools/search.mjs` 以 stdio 加载 open-websearch，配置的引擎为 Bing。旧检查点调用 `web_search(query)` 时只连接 `search` 服务，传入 `query` 和 `limit=5`，原样回填工具返回的文本。[MCP 工具规范（2025-11-25）](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) · [注册表](../tool_registry.py) · [传输测试](../test_external_tools.py)
 
 **文件验收**。已用 fake model 驱动真实 filesystem MCP，在临时会话写入并读回 `index.html`，核对了磁盘内容和会话返回值。网页文件区只收集根层、符合命名规则且至多 1 MiB 的 UTF-8 普通文本文件。检查轨迹时按 `call_id` 对照模型请求、写入参数和工具结果；页面外观与按钮行为仍需打开预览单独验收。[轨迹测试](../test_trace_events.py) · [网页入口](../frontend/index.html)
+
+## 两个轻量项目如何划分职责
+
+mini-SWE-agent 把循环、模型和执行环境拆开，可以单独理解每一部分。Mini Harness 中，同一个 `run` 既能由本地 Ollama 驱动，也能用几条固定响应回放。读代码时可以从一个写入任务开始，观察执行环境怎样把结果交还模型。[mini-SWE-agent 项目说明](https://mini-swe-agent.com/latest/)
+
+Hugging Face smolagents 的多步 Agent 接收模型、工具、最大步数和逐步回调。这里保留同样可单独检查的两个控制点。父子助手在执行前扣除同一份预算，每个步骤通过事件发给网页。验收时可把步数设为零，检查工具没有被执行，也可以让模型多次读取同一个文件，核对每次调用都有独立记录。[smolagents Agent API](https://huggingface.co/docs/smolagents/reference/agents)
+
+**本机实测**。用默认 Qwen 和外部文件工具生成带「开始」按钮的网页，再在同一会话中要求改为「继续」。第二轮轨迹依次记录读取、写入；两轮都从磁盘核对了按钮文字。搜索供应方单独通过公开查询返回了 Python 官网链接，验收脚本见 [external-tools/smoke.py](../external-tools/smoke.py)。

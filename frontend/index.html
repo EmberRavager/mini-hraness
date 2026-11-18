@@ -68,6 +68,11 @@
   const prefix = 'mini-harness:';
   let workspace, session, busy = false, ready = false, loadingModels = false;
   let composing = false;
+  let draftRevision = 0;
+
+  function keepEditorFocus(event) {
+    if (event.button === 0 && document.activeElement === $('message')) event.preventDefault();
+  }
 
   function draftKey() {
     return prefix + 'draft:' + workspace + ':' + session;
@@ -110,6 +115,7 @@
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.textContent = '重新连接';
+      retry.onmousedown = keepEditorFocus;
       retry.onclick = () => {
         loadModels();
         run(() => restore(workspace || 'default', session));
@@ -640,14 +646,15 @@
     ready = false;
     const key = prefix + 'session:' + name;
     const next = id || localStorage.getItem(key) || crypto.randomUUID();
-    if (session && (workspace !== name || session !== next)) {
+    const switching = workspace !== name || session !== next;
+    if (session && switching) {
       saveDraft();
       $('message').value = '';
       composing = false;
     }
     workspace = $('space').value = name;
     session = next;
-    if (!$('message').value && !composing) $('message').value = sessionStorage.getItem(draftKey()) || '';
+    if (switching && !$('message').value && !composing) $('message').value = sessionStorage.getItem(draftKey()) || '';
     localStorage.setItem(key, session);
     localStorage.setItem(prefix + 'workspace', name);
     $('workspace-name').textContent = '工作区 / ' + name;
@@ -691,9 +698,7 @@
   $('show-chat').onclick = () => view(false);
   $('show-trace').onclick = () => view(true);
   // 鼠标刷新模型时保留正在编辑的组合文本，键盘仍可 Tab 到按钮。
-  $('reload-models').onmousedown = event => {
-    if (event.button === 0 && document.activeElement === $('message')) event.preventDefault();
-  };
+  $('reload-models').onmousedown = keepEditorFocus;
   $('reload-models').onclick = loadModels;
   $('model').onchange = () => {
     localStorage.setItem(prefix + 'model', $('model').value);
@@ -704,7 +709,10 @@
     run(() => restore($('space').value));
   };
   $('fresh').onclick = () => run(() => restore(workspace || 'default', crypto.randomUUID()));
-  $('message').oninput = updateSend;
+  $('message').oninput = () => {
+    draftRevision++;
+    updateSend();
+  };
   $('message').addEventListener('compositionstart', () => {
     composing = true;
     updateSend();
@@ -720,6 +728,7 @@
     const message = $('message').value.trim();
     if ($('send').disabled || composing || !message) return;
     const draft = $('message').value;
+    const sentRevision = draftRevision;
     const body = {message, model};
     if ($('online').checked) {
       body.online = true;
@@ -735,7 +744,7 @@
         await streamReply('/chat', body);
       } catch (error) {
         // 断线时保住刚发送的内容；用户已经在打下一条时保留新草稿。
-        if (!$('message').value && !composing) $('message').value = draft;
+        if (draftRevision === sentRevision && !$('message').value && !composing) $('message').value = draft;
         saveDraft();
         throw error;
       }
