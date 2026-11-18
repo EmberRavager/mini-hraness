@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "files": {
+      "command": "./external-tools/node",
+      "args": ["./external-tools/node_modules/.bin/mcp-server-filesystem", "{workspace}"],
+      "allow": ["list_directory", "read_text_file", "write_file"],
+      "readOnly": ["list_directory", "read_text_file"]
+    },
+    "search": {
+      "command": "./external-tools/node",
+      "args": ["./external-tools/search.mjs"],
+      "allow": ["search"],
+      "online": true
+    }
+  }
+}

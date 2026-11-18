@@ -1,0 +1,11 @@
+{
+  "name": "mini-harness-external-tools",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "2.4.0",
+    "open-websearch": "2.2.0"
+  }
+}
