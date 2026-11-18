@@ -26,8 +26,11 @@ def save(state):
         json.dump(state, tmp)
     Path(tmp.name).replace(CHECKPOINT)
 
+def preview(name, text):
+    print(f"写入 {name!r}，共 {len(text)} 字符。预览：{text[:1600]!r}")
+
 def approve(name, text):
-    print(f"写入 {name}，共 {len(text)} 字符。预览：{text[:1600]!r}")
+    preview(name, text)
     return input("允许写入？[y/N] ").strip().lower() == "y"
 
 def main():
@@ -35,10 +38,19 @@ def main():
     parser.add_argument("task", nargs="?")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--model")
+    parser.add_argument("--workspace", type=Path, help="终端聊天的工作区根目录")
     parser.add_argument("--expect")
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--seconds", type=int, default=120)
     args = parser.parse_args()
+    if args.task is None and not args.resume:
+        if not args.model:
+            parser.error("请用 --model 指定本地模型")
+        from terminal_chat import interact
+        root = args.workspace or Path(".mini-harness/workspaces")
+        return interact(root, partial(chat, args.model), preview)
+    if args.workspace is not None:
+        parser.error("--workspace 适用于终端聊天或 --web")
     CHECKPOINT.parent.mkdir(exist_ok=True)
     state = json.loads(CHECKPOINT.read_text()) if CHECKPOINT.exists() else {}
     if args.resume != (state.get("status") == "running") or bool(args.task) == args.resume:
