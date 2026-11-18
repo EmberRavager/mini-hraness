@@ -3,77 +3,85 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>本地对话 · Mini Harness</title>
-<style>
-  * { box-sizing: border-box }
-  body { margin: 0; background: #f7f9f8; color: #192e28; font: 16px/1.6 system-ui, sans-serif }
-  main { max-width: 52rem; margin: auto; padding: clamp(16px, 4vw, 40px) }
-  h1 { margin: 0 0 16px; font-size: 1.65rem }
-  h2 { font-size: 1rem; margin: 0 0 6px }
-  p, pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 }
-  small, label { color: #4e635b }
-  .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px }
-  input, textarea, button { font: inherit; border: 1px solid #a8b7b0; border-radius: 6px; padding: 8px 12px }
-  input { width: 12rem; max-width: 100% }
-  button { background: white; color: inherit; cursor: pointer }
-  button:hover:enabled { border-color: #1a6550 }
-  button:disabled { opacity: .5; cursor: default }
-  .primary { background: #195d4a; color: white }
-  section, #composer { margin-top: 18px; border-top: 1px solid #ccd6d1; padding-top: 12px }
-  #history { max-height: 46vh; overflow: auto }
-  article { padding: 8px 0 }
-  article strong { font-size: .85rem; color: #24674f }
-  textarea, pre { width: 100%; background: white; margin: 5px 0 }
-  textarea { display: block; resize: vertical }
-  pre { max-height: 18rem; overflow: auto; padding: 12px }
-  #status { flex: 1; font-size: .9rem }
-  #root, #files button { overflow-wrap: anywhere; max-width: 100% }
-</style>
-<main>
-  <h1>本地对话</h1>
-  <form id="spaces" class="row">
-    <label for="space">工作区</label>
-    <input id="space" list="choices" required pattern="[A-Za-z0-9_\-]+" title="请输入英文字母、数字、下划线或连字符" autocomplete="off">
-    <datalist id="choices"></datalist>
-    <button>切换</button><button type="button" id="fresh">新会话</button>
-  </form>
-  <small>工作目录为根目录 <code id="root">…</code> 下的专用工作区。启动服务时可指定根目录。</small>
-  <section>
-    <h2 id="heading">对话记录</h2>
-    <div id="history" role="log"></div>
-  </section>
-  <section id="review" hidden>
-    <h2>待审批的文件写入</h2><strong id="filename"></strong><pre id="preview"></pre>
-    <div class="row"><button class="primary" id="allow">批准</button><button id="deny">拒绝</button></div>
-  </section>
-  <section id="downloads" hidden><h2>会话文件</h2><div id="files" class="row"></div></section>
-  <form id="composer">
-    <label for="message">消息</label>
-    <textarea id="message" rows="3" placeholder="输入消息…" disabled></textarea>
-    <div class="row"><span id="status" role="status">正在连接…</span><button class="primary" id="send" disabled>发送</button></div>
-  </form>
-</main>
+<link rel="stylesheet" href="styles.css">
+<body>
+<div class="desk">
+  <aside id="sidebar" aria-label="工作区工具">
+    <div class="brand"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="m7 20 5-11h4l-5 11zm9 3 5-11h4l-5 11z"/></svg>Mini Harness</div>
+    <button type="button" id="fresh"><span aria-hidden="true">＋</span> 新会话</button>
+    <form id="spaces">
+      <label for="space">工作区</label>
+      <div class="picker"><input id="space" value="default" list="choices" required maxlength="60" pattern="[A-Za-z0-9_\-]+" title="英文字母、数字、下划线或短横线" autocomplete="off"><button>切换</button></div>
+      <datalist id="choices"></datalist>
+    </form>
+    <nav aria-labelledby="sessions-title"><h2 id="sessions-title">会话记录</h2>
+      <div id="sessions"></div><p id="list-note" role="status">正在读取会话…</p>
+    </nav>
+    <details class="directory"><summary>工作根目录</summary><code id="root">正在读取…</code></details>
+  </aside>
+  <main>
+    <header class="sheet-head">
+      <button type="button" id="menu" aria-controls="sidebar" aria-expanded="false" aria-label="工作区与会话">☰</button>
+      <div class="title"><small id="workspace-name">工作区</small><h1 id="heading">正在读取会话…</h1></div>
+      <div class="views" role="group" aria-label="会话视图">
+        <button type="button" id="show-chat" aria-controls="conversation" aria-pressed="true">对话</button>
+        <button type="button" id="show-trace" aria-controls="trajectory" aria-pressed="false">轨迹</button>
+      </div>
+    </header>
+    <div id="scroll">
+      <section id="conversation" class="reading" aria-label="对话">
+        <div id="empty" hidden><h2>从一个任务开始</h2><p>描述你想完成的事，也可以在下一轮继续修改。</p>
+          <button id="example" type="button">试试：写一个深浅色切换页面 <span aria-hidden="true">↗</span></button>
+        </div>
+        <div id="history" role="log" aria-label="消息记录"></div>
+        <section id="downloads" hidden><h2>会话文件</h2><div id="files"></div></section>
+      </section>
+      <section id="trajectory" class="reading" aria-label="最近一次运行轨迹" hidden>
+        <h2>最近一次运行轨迹</h2><p id="trace-empty">当前会话暂无运行轨迹。</p><ol id="trace"></ol>
+      </section>
+    </div>
+    <form id="composer">
+      <div class="compose-box">
+        <label class="sr-only" for="message">你的消息</label>
+        <textarea id="message" rows="2" maxlength="16000" placeholder="描述任务，或继续追问…" disabled></textarea>
+        <div class="compose-foot">
+          <div class="model-picker"><label for="model">Ollama</label><select id="model" aria-label="Ollama 模型" aria-describedby="model-note" disabled></select></div>
+          <button id="reload-models" type="button" title="刷新模型列表" aria-label="刷新模型列表">↻</button>
+          <button class="primary" id="send" title="⌘ / Ctrl + Enter 发送" disabled>发送 <span aria-hidden="true">↑</span></button>
+        </div>
+        <p id="model-note" role="status">正在读取模型…</p>
+      </div>
+      <div id="status" role="status"></div>
+    </form>
+  </main>
+</div>
 <script>
   const $ = id => document.getElementById(id);
   const prefix = 'mini-harness:';
-  let workspace, session, approval, busy = false, ready = false;
+  let workspace, session, busy = false, ready = false, loadingModels = false;
 
   function controls() {
     for (const el of $('spaces').elements) el.disabled = busy;
-    $('message').disabled = busy || !ready || !!approval;
-    $('send').disabled = $('message').disabled || !$('message').value.trim();
-    $('allow').disabled = $('deny').disabled = busy || !ready;
+    for (const el of $('sessions').children) el.disabled = busy;
+    $('fresh').disabled = busy;
+    $('reload-models').disabled = busy || loadingModels;
+    $('model').disabled = busy || loadingModels || !$('model').options.length;
+    const canCompose = ready && !$('model').disabled && !!$('model').value;
+    $('example').disabled = !canCompose;
+    $('message').disabled = !canCompose;
+    $('send').disabled = !canCompose || !$('message').value.trim();
   }
 
   async function run(action) {
     if (busy) return;
     busy = true;
     controls();
-    $('status').textContent = '待处理…';
+    $('status').textContent = '正在处理…';
     try {
       await action();
     } catch (error) {
       ready = false;
-      $('status').textContent = '出错（' + error.message + '）。可切换以重新载入，或开启新会话。';
+      $('status').textContent = '出错（' + error.message + '）。可重新打开会话，或切换工作区。';
     } finally {
       busy = false;
       controls();
@@ -91,31 +99,62 @@
     return res.json();
   }
 
+  async function loadModels() {
+    if (busy || loadingModels) return;
+    loadingModels = true;
+    $('model').replaceChildren();
+    $('model-note').textContent = '正在读取模型…';
+    controls();
+    try {
+      const {models, default_model} = await request('/models');
+      const names = [...new Set(models.filter(name => typeof name === 'string' && name.trim()))];
+      const saved = localStorage.getItem(prefix + 'model');
+      for (const name of names) $('model').append(new Option(name, name));
+      if (names.length) {
+        $('model').value = [saved, default_model].find(name => names.includes(name)) || names[0];
+      }
+      $('model-note').textContent = names.length ? '' : '尚无可用模型。请在 Ollama 安装模型后刷新。';
+    } catch {
+      $('model-note').textContent = '无法读取模型。请检查本地服务，再刷新模型列表。';
+    } finally {
+      loadingModels = false;
+      controls();
+    }
+  }
+
+  function view(trace) {
+    $('conversation').hidden = trace;
+    $('trajectory').hidden = !trace;
+    $('show-chat').setAttribute('aria-pressed', String(!trace));
+    $('show-trace').setAttribute('aria-pressed', String(trace));
+    $('scroll').scrollTop = trace ? 0 : $('scroll').scrollHeight;
+  }
+
   function entry(role, value) {
     const row = document.createElement('article');
     const label = document.createElement('strong');
     const content = document.createElement('p');
     label.textContent = role;
+    row.className = role === '你' ? 'from-user' : 'from-agent';
     content.textContent = value;
     row.append(label, content);
     $('history').append(row);
-    $('history').scrollTop = $('history').scrollHeight;
+    $('empty').hidden = true;
+    if (!$('conversation').hidden) $('scroll').scrollTop = $('scroll').scrollHeight;
   }
 
   function assets(data) {
-    approval = data.approval;
-    $('review').hidden = !approval;
-    $('filename').textContent = approval?.name || '';
-    $('preview').textContent = approval?.text || '';
     $('files').replaceChildren();
     for (const [name, content] of Object.entries(data.files || {})) {
       const button = document.createElement('button');
-      button.textContent = '下载 ' + name;
+      button.type = 'button';
+      button.textContent = name;
+      button.setAttribute('aria-label', '下载 ' + name);
       button.onclick = () => {
         const link = document.createElement('a');
         const url = URL.createObjectURL(new Blob([content], {type: 'application/octet-stream'}));
         link.href = url;
-        link.download = name || 'download';
+        link.download = name;
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       };
@@ -124,68 +163,152 @@
     $('downloads').hidden = !$('files').childElementCount;
   }
 
+  function showTrace(steps = []) {
+    $('trace').replaceChildren();
+    for (const [role, action, result] of steps) {
+      const item = document.createElement('li');
+      const heading = document.createElement('strong');
+      const detail = document.createElement('p');
+      heading.textContent = role + ' · ' + action;
+      detail.textContent = result;
+      item.append(heading, detail);
+      $('trace').append(item);
+    }
+    $('trace-empty').hidden = !!$('trace').childElementCount;
+  }
+
   function addChoice(name) {
     if (!Array.from($('choices').options).some(option => option.value === name))
       $('choices').append(new Option(name, name));
   }
 
-  async function restore(name, fresh = false) {
-    if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error('工作区名称无效');
-    workspace = $('space').value = name;
-    const key = prefix + 'session:' + name;
-    session = (!fresh && localStorage.getItem(key)) || crypto.randomUUID();
-    localStorage.setItem(key, session);
-    localStorage.setItem(prefix + 'workspace', name);
-    $('heading').textContent = name + ' · 对话记录';
-    $('history').replaceChildren();
-    $('message').value = '';
-    assets({});
-    const data = await request('/session', {});
-    for (const [user, assistant] of data.turns) {
-      entry('你', user);
-      entry('助手', assistant);
-    }
-    if (data.pendingMessage) entry('你', data.pendingMessage);
-    assets(data);
-    addChoice(name);
-    ready = true;
-    $('status').textContent = approval ? '待审批' : '就绪';
+  function menu(open) {
+    $('menu').setAttribute('aria-expanded', String(open));
+    $('sidebar').classList.toggle('open', open);
   }
 
-  async function update(path, body) {
-    const data = await request(path, body);
+  async function listSessions() {
+    try {
+      const {sessions} = await request('/sessions', {});
+      $('sessions').replaceChildren();
+      for (const {id, title} of sessions) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = button.title = title || '新会话';
+        if (id === session) {
+          button.setAttribute('aria-current', 'true');
+          $('heading').textContent = button.textContent;
+        }
+        button.onclick = () => run(() => restore(workspace, id));
+        button.disabled = busy;
+        $('sessions').append(button);
+      }
+      $('list-note').textContent = sessions.length ? '' : '此工作区暂无会话记录。';
+    } catch {
+      $('list-note').textContent = '无法读取会话列表。请重新切换工作区以加载。';
+    }
+  }
+
+  async function finish(data) {
+    // 网页只自动确认后端现有的会话文件写入，不改变工具权限。
+    while (data.approval) {
+      $('status').textContent = '正在写入会话文件…';
+      data = await request('/approve', {allow:true});
+    }
     if (data.reply) entry('助手', data.reply);
     assets(data);
-    $('status').textContent = approval ? '待审批' : data.status || '就绪';
+    showTrace(data.trace);
+    if (!$('conversation').hidden) $('scroll').scrollTop = $('scroll').scrollHeight;
+    $('status').textContent = data.status === 'stopped' ? '任务已停止' : '';
   }
 
-  $('space').value = 'default';
+  async function restore(name, id) {
+    if (!/^[A-Za-z0-9_-]{1,60}$/.test(name)) throw new Error('工作区名请用 1 至 60 个英文字母、数字、下划线或短横线');
+    menu(false);
+    ready = false;
+    workspace = $('space').value = name;
+    const key = prefix + 'session:' + name;
+    session = id || localStorage.getItem(key) || crypto.randomUUID();
+    localStorage.setItem(key, session);
+    localStorage.setItem(prefix + 'workspace', name);
+    $('workspace-name').textContent = '工作区 / ' + name;
+    $('heading').textContent = '新会话';
+    $('sessions').replaceChildren();
+    $('list-note').textContent = '正在读取会话…';
+    $('history').replaceChildren();
+    $('empty').hidden = true;
+    $('message').value = '';
+    assets({});
+    showTrace();
+    view(false);
+    try {
+      const data = await request('/session', {});
+      for (const [user, assistant] of data.turns) {
+        entry('你', user);
+        entry('助手', assistant);
+      }
+      if (data.pendingMessage) entry('你', data.pendingMessage);
+      $('heading').textContent = data.turns[0]?.[0] || data.pendingMessage || '新会话';
+      await finish(data);
+      $('empty').hidden = !!$('history').childElementCount;
+      addChoice(name);
+      ready = true;
+    } finally {
+      await listSessions();
+    }
+  }
+
+  $('menu').onclick = () => menu(!$('sidebar').classList.contains('open'));
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && $('sidebar').classList.contains('open')) {
+      menu(false);
+      $('menu').focus();
+    }
+  });
+  $('show-chat').onclick = () => view(false);
+  $('show-trace').onclick = () => view(true);
+  $('reload-models').onclick = loadModels;
+  $('model').onchange = () => {
+    localStorage.setItem(prefix + 'model', $('model').value);
+    controls();
+  };
   $('spaces').onsubmit = event => {
     event.preventDefault();
     run(() => restore($('space').value));
   };
-  $('fresh').onclick = () => run(() => restore(workspace || 'default', true));
+  $('fresh').onclick = () => run(() => restore(workspace || 'default', crypto.randomUUID()));
   $('message').oninput = controls;
   $('composer').onsubmit = event => {
     event.preventDefault();
-    if ($('send').disabled) return;
+    const model = $('model').value;
+    const message = $('message').value.trim();
+    if (busy || loadingModels || !ready || !model || !message) return;
     run(async () => {
-      const message = $('message').value.trim();
+      view(false);
+      if (!$('history').childElementCount) $('heading').textContent = message;
       $('message').value = '';
       entry('你', message);
-      await update('/chat', {message});
+      await finish(await request('/chat', {message, model}));
+      await listSessions();
     });
   };
-  for (const [id, allow] of [['allow', true], ['deny', false]]) {
-    $(id).onclick = () => {
-      if (approval && ready) run(() => update('/approve', {allow}));
-    };
-  }
-  run(async () => {
-    const info = await request('/info');
+  $('example').onclick = () => {
+    $('message').value = '写一个可以切换深浅色的单页网页。';
+    controls();
+    $('message').focus();
+  };
+  $('message').onkeydown = event => {
+    if (!event.isComposing && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      if (!$('send').disabled) $('composer').requestSubmit();
+    }
+  };
+  loadModels();
+  request('/info').then(info => {
     $('root').textContent = info.root;
     info.workspaces.forEach(addChoice);
-    await restore(localStorage.getItem(prefix + 'workspace') || 'default');
-  });
+  }).catch(() => { $('root').textContent = '暂时无法读取'; });
+  run(() => restore(localStorage.getItem(prefix + 'workspace') || 'default'));
 </script>
+</body>
 </html>

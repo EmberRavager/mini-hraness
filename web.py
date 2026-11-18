@@ -1,10 +1,21 @@
 """本机 JSON API；不提供 HTML，也不知道界面的布局。"""
 import argparse
+import http.client
 import json
-from functools import partial
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from session_layer import dispatch
+
+
+def installed_models():
+    # 只向本机 Ollama 查询清单，不下载模型，也不接受浏览器指定服务地址。
+    with closing(http.client.HTTPConnection('127.0.0.1', 11434, timeout=4)) as conn:
+        conn.request('GET', '/api/tags')
+        reply = conn.getresponse()
+        if reply.status != 200:
+            raise OSError(f'Ollama HTTP {reply.status}')
+        return [item['name'] for item in json.load(reply)['models']]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -44,12 +55,17 @@ class Handler(BaseHTTPRequestHandler):
             root = self.server.root
             return self.send(dict(root=str(root), workspaces=sorted(p.name for p in root.iterdir()
                 if not p.is_symlink() and (p / '.mini-harness').is_dir())))
+        if self.path == '/models':
+            try:
+                return self.send(dict(models=installed_models(), default_model=self.server.default_model))
+            except (OSError, http.client.HTTPException, KeyError, ValueError, TypeError) as error:
+                return self.send(dict(error=f'无法读取 Ollama 模型列表，请检查本机服务：{error}'), 502)
         self.send({}, 404)
 
     def do_POST(self):
         if not self.local():
             return self.send({}, 403)
-        if self.path not in ('/chat', '/approve', '/session'):
+        if self.path not in ('/chat', '/approve', '/session', '/sessions'):
             return self.send({}, 404)
         try:
             size = int(self.headers.get('Content-Length', '0'))
@@ -58,10 +74,15 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError('需要 JSON 对象')
-            self.send(dispatch(self.server.root, self.path, body, self.server.model))
+            selected = self.server.default_model
+            if self.path == '/chat' and 'model' in body:
+                selected = body['model']
+                if not isinstance(selected, str) or selected not in installed_models():
+                    raise ValueError('所选模型不在 Ollama 列表中，请刷新模型列表')
+            self.send(dispatch(self.server.root, self.path, body, self.server.model, model_name=selected))
         except ValueError as error:
             self.send(dict(error=str(error)), 400)
-        except (OSError, KeyError) as error:
+        except (OSError, KeyError, http.client.HTTPException) as error:
             self.send(dict(error=f'本地模型或工作目录异常：{error}'), 502)
 
 
@@ -75,6 +96,7 @@ if __name__ == '__main__':
     with HTTPServer(('127.0.0.1', args.port), Handler) as server:
         server.root = args.workspace.expanduser().resolve()
         server.root.mkdir(parents=True, exist_ok=True)
-        server.model = partial(chat, args.model)
+        server.default_model = args.model
+        server.model = chat
         print(f'API：http://127.0.0.1:{server.server_port}   工作目录：{server.root}', flush=True)
         server.serve_forever()

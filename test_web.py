@@ -1,12 +1,59 @@
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from session_layer import dispatch
+from web import Handler, installed_models
 
 
 class ConversationTest(unittest.TestCase):
+    @patch('web.dispatch')
+    @patch('web.installed_models', return_value=['local:4b'])
+    def test_http_rejects_unknown_model_before_dispatch(self, catalog, dispatcher):
+        handler = Mock(path='/chat')
+        payload = b'{"message":"hello","model":"missing"}'
+        handler.headers.get.return_value = str(len(payload))
+        handler.headers.get_content_type.return_value = 'application/json'
+        handler.rfile = BytesIO(payload)
+        Handler.do_POST(handler)
+        self.assertEqual(handler.send.call_args.args[1], 400)
+        dispatcher.assert_not_called()
+
+    @patch('web.http.client.HTTPConnection')
+    def test_model_list_uses_local_ollama_and_reports_offline(self, connect):
+        response = BytesIO(b'{"models":[{"name":"first:4b"},{"name":"next:8b"}]}')
+        response.status = 200
+        connect.return_value.getresponse.return_value = response
+        self.assertEqual(installed_models(), ['first:4b', 'next:8b'])
+        connect.return_value.request.assert_called_once_with('GET', '/api/tags')
+        connect.side_effect = ConnectionRefusedError('offline')
+        handler = Mock(path='/models')
+        Handler.do_GET(handler)
+        self.assertEqual(handler.send.call_args.args[1], 502)
+
+    def test_selected_model_stays_with_pending_run_and_sessions_are_scoped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, session = Path(directory), str(uuid4())
+            actions = iter([dict(op='write', name='a.txt', text='a'), dict(op='done', text='一'),
+                            dict(op='done', text='二')])
+            used = []
+            def model(name, *_):
+                used.append(name)
+                return next(actions)
+            def post(route, workspace='demo', name='alpha', **body):
+                return dispatch(root, route, dict(session=session, workspace=workspace, **body),
+                                model, model_name=name)
+            post('/chat', message='第一条')
+            post('/approve', name='beta', allow=True)
+            post('/chat', name='beta', message='第二条')
+            self.assertEqual(used, ['alpha', 'alpha', 'beta'])
+            self.assertEqual(post('/sessions')['sessions'], [dict(id=session, title='第一条')])
+            self.assertEqual(post('/sessions', workspace='other')['sessions'], [])
+            self.assertEqual(post('/session')['trace'], [['主', 'done', '二']])
+
     def test_followup_approval_and_session_isolation(self):
         with tempfile.TemporaryDirectory() as directory:
             root, session = Path(directory), str(uuid4())
