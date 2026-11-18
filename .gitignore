@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.mini-harness/
+mini-harness-output-*/
+.env*
+!.env.example
+.DS_Store
