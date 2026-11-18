@@ -26,7 +26,7 @@ def remember_session(marker, session):
         path.replace(marker)
 
 
-def interact(root, model, preview):
+def interact(root, model, preview, *, tool_config=None):
     root = root.expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     marker = root / ".terminal-session"
@@ -34,7 +34,7 @@ def interact(root, model, preview):
 
     def post(route, session_id, **fields):
         body = dict(workspace="default", session=session_id, **fields)
-        return dispatch(root, route, body, model)
+        return dispatch(root, route, body, model, tool_config=tool_config)
 
     state = post("/session", session)
     if state.get("turns"):

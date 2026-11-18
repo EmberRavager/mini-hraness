@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="frame-src about:">
 <title>本地对话 · Mini Harness</title>
 <link rel="stylesheet" href="styles.css">
 <body>
@@ -34,7 +35,13 @@
           <button id="example" type="button">试试：写一个深浅色切换页面 <span aria-hidden="true">↗</span></button>
         </div>
         <div id="history" role="log" aria-label="消息记录"></div>
-        <section id="downloads" hidden><h2>会话文件</h2><div id="files"></div></section>
+        <section id="downloads" hidden><h2>会话文件</h2>
+          <div class="file-actions">
+            <button type="button" id="preview-toggle" aria-controls="preview" aria-expanded="false" hidden>预览 index.html</button>
+            <div id="files"></div>
+          </div>
+          <div id="preview"></div>
+        </section>
       </section>
       <section id="trajectory" class="reading" aria-label="最近一次运行轨迹" hidden>
         <h2>最近一次运行轨迹</h2><p id="trace-empty">当前会话暂无运行轨迹。</p><ol id="trace"></ol>
@@ -43,12 +50,13 @@
     <form id="composer">
       <div class="compose-box">
         <label class="sr-only" for="message">你的消息</label>
-        <textarea id="message" rows="2" maxlength="16000" placeholder="描述任务，或继续追问…" disabled></textarea>
+        <textarea id="message" lang="zh-CN" rows="2" maxlength="16000" placeholder="输入消息…（回车换行，⌘ / Ctrl + Enter 发送）"></textarea>
         <div class="compose-foot">
           <div class="model-picker"><label for="model">Ollama</label><select id="model" aria-label="Ollama 模型" aria-describedby="model-note" disabled></select></div>
           <button id="reload-models" type="button" title="刷新模型列表" aria-label="刷新模型列表">↻</button>
           <button class="primary" id="send" title="⌘ / Ctrl + Enter 发送" disabled>发送 <span aria-hidden="true">↑</span></button>
         </div>
+        <label class="online-option"><input id="online" type="checkbox" autocomplete="off">允许本轮联网搜索（仅发送搜索关键词）</label>
         <p id="model-note" role="status">正在读取模型…</p>
       </div>
       <div id="status" role="status"></div>
@@ -59,6 +67,26 @@
   const $ = id => document.getElementById(id);
   const prefix = 'mini-harness:';
   let workspace, session, busy = false, ready = false, loadingModels = false;
+  let composing = false;
+
+  function draftKey() {
+    return prefix + 'draft:' + workspace + ':' + session;
+  }
+
+  // 只在离开页面时保存，不在 IME 组合或流式更新时回写输入框。
+  function saveDraft() {
+    if (!session) return;
+    const draft = $('message').value;
+    if (draft) sessionStorage.setItem(draftKey(), draft);
+    else sessionStorage.removeItem(draftKey());
+  }
+  window.addEventListener('pagehide', saveDraft);
+
+  function updateSend() {
+    $('send').disabled = busy || !ready || loadingModels || !$('model').value ||
+      composing || !$('message').value.trim();
+    $('example').disabled = !!$('message').value || composing;
+  }
 
   function controls() {
     for (const el of $('spaces').elements) el.disabled = busy;
@@ -66,10 +94,7 @@
     $('fresh').disabled = busy;
     $('reload-models').disabled = busy || loadingModels;
     $('model').disabled = busy || loadingModels || !$('model').options.length;
-    const canCompose = ready && !$('model').disabled && !!$('model').value;
-    $('example').disabled = !canCompose;
-    $('message').disabled = !canCompose;
-    $('send').disabled = !canCompose || !$('message').value.trim();
+    updateSend();
   }
 
   async function run(action) {
@@ -81,21 +106,67 @@
       await action();
     } catch (error) {
       ready = false;
-      $('status').textContent = '出错（' + error.message + '）。可重新打开会话，或切换工作区。';
+      $('status').textContent = error.message + ' ';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = '重新连接';
+      retry.onclick = () => {
+        loadModels();
+        run(() => restore(workspace || 'default', session));
+      };
+      $('status').append(retry);
     } finally {
       busy = false;
       controls();
     }
   }
 
-  async function request(path, body) {
+  async function readStream(response, onFrame) {
+    const reader = response.body.pipeThrough(new TextDecoderStream('utf-8', {fatal:true})).getReader();
+    let pending = '';
+    try {
+      while (true) {
+        const {value = '', done} = await reader.read();
+        const lines = (pending + value).split('\n');
+        pending = done ? '' : lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const frame = JSON.parse(line);
+          switch (frame.type) {
+            case 'delta':
+              if (typeof frame.text !== 'string') throw new Error('回复片段格式错误');
+              if (frame.text) onFrame(frame);
+              break;
+            case 'activity':
+            case 'reset':
+              onFrame(frame);
+              break;
+            case 'result':
+              if (!frame.data || typeof frame.data !== 'object' || Array.isArray(frame.data))
+                throw new Error('缺少运行结果');
+              return frame.data;
+            case 'error':
+              throw new Error(frame.error || '运行失败');
+          }
+        }
+        if (done) throw new Error('回复中断，未收到最终结果');
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  }
+
+  async function request(path, body, onFrame) {
     const port = new URLSearchParams(location.search).get('apiPort') || '8765';
     if (!/^\d{1,5}$/.test(port)) throw new Error('API 端口无效');
     const res = await fetch('http://127.0.0.1:' + port + path, body && {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json', Accept:onFrame ? 'application/x-ndjson' : 'application/json'},
       body: JSON.stringify({workspace, session, ...body})
     });
     if (!res.ok) throw new Error((await res.json()).error || 'HTTP ' + res.status);
+    if (onFrame && res.headers.get('Content-Type')?.split(';')[0].trim() !== 'application/json')
+      return readStream(res, onFrame);
     return res.json();
   }
 
@@ -130,6 +201,76 @@
     $('scroll').scrollTop = trace ? 0 : $('scroll').scrollHeight;
   }
 
+  function appendInline(parent, line) {
+    let offset = 0;
+    for (const match of line.matchAll(/\x60([^\x60\n]+)\x60|\[([^\[\]\n]+)\]\((https?:\/\/[^\s()]+)\)/gi)) {
+      parent.append(line.slice(offset, match.index));
+      if (match[1] !== undefined) {
+        const code = document.createElement('code');
+        code.textContent = match[1];
+        parent.append(code);
+      } else if (URL.canParse(match[3])) {
+        const link = document.createElement('a');
+        link.href = match[3];
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = match[2];
+        parent.append(link);
+      } else parent.append(match[0]);
+      offset = match.index + match[0].length;
+    }
+    parent.append(line.slice(offset));
+  }
+
+  function markdownReply(value) {
+    const body = document.createElement('div');
+    body.className = 'markdown-reply';
+    const lines = value.split(/\r\n?|\n/);
+    let block;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const fence = /^ {0,3}(\x60{3,}|~{3,})/.exec(line);
+      const heading = /^ {0,3}(#{1,6})\s+(.+)$/.exec(line);
+      const list = /^\s*(?:[-+*]|(\d{1,9})[.)])\s+(.+)$/.exec(line);
+      if (fence) {
+        const start = ++i;
+        const close = new RegExp('^ {0,3}' + fence[1][0] + '{' + fence[1].length + ',}\\s*$');
+        while (i < lines.length && !close.test(lines[i])) i++;
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        code.textContent = lines.slice(start, i).join('\n');
+        pre.append(code);
+        body.append(pre);
+        block = null;
+      } else if (heading) {
+        const title = document.createElement('h' + heading[1].length);
+        appendInline(title, heading[2]);
+        body.append(title);
+        block = null;
+      } else if (list) {
+        const tag = list[1] ? 'ol' : 'ul';
+        if (block?.localName !== tag) {
+          block = document.createElement(tag);
+          if (list[1]) block.start = Number(list[1]);
+          body.append(block);
+        }
+        const item = document.createElement('li');
+        appendInline(item, list[2]);
+        block.append(item);
+      } else if (!line.trim()) {
+        block = null;
+      } else {
+        if (block?.localName === 'p') block.append('\n');
+        else {
+          block = document.createElement('p');
+          body.append(block);
+        }
+        appendInline(block, line);
+      }
+    }
+    return body;
+  }
+
   function entry(role, value) {
     const row = document.createElement('article');
     const label = document.createElement('strong');
@@ -137,13 +278,55 @@
     label.textContent = role;
     row.className = role === '你' ? 'from-user' : 'from-agent';
     content.textContent = value;
-    row.append(label, content);
+    row.append(label, role === '助手' && value ? markdownReply(value) : content);
     $('history').append(row);
     $('empty').hidden = true;
     if (!$('conversation').hidden) $('scroll').scrollTop = $('scroll').scrollHeight;
+    return row;
   }
 
+  // 每轮保留自己的统计，旧会话可以没有用量。
+  function showUsage(row, usage) {
+    if (!usage) return;
+    const number = (value, digits = 0) => Number.isFinite(value)
+      ? value.toLocaleString('zh-CN', {maximumFractionDigits:digits}) : '—';
+    const footer = document.createElement('small');
+    footer.className = 'usage';
+    footer.title = '输入、输出与生成速度汇总本轮调用。上下文为最近一次输入 token 数 / 模型加载容量。';
+    footer.textContent = [
+      '输入 ' + number(usage.input_tokens) + ' token',
+      '输出 ' + number(usage.output_tokens) + ' token',
+      number(usage.output_tps, 1) + ' token/s',
+      '上下文 ' + number(usage.last_input_tokens) + ' / ' + number(usage.context_length),
+      '模型耗时 ' + number(Number.isFinite(usage.elapsed_ms) ? usage.elapsed_ms / 1000 : null, 2) + ' 秒',
+    ].join(' · ');
+    row.append(footer);
+  }
+
+  let previewSource;
+  function showPreview(open) {
+    const toggle = $('preview-toggle');
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.textContent = open ? '关闭预览' : '预览 index.html';
+    $('preview').replaceChildren();
+    if (!open) return;
+    const frame = document.createElement('iframe');
+    frame.title = 'index.html 隔离预览';
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.referrerPolicy = 'no-referrer';
+    const policy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'";
+    frame.srcdoc = '<!doctype html><meta http-equiv="Content-Security-Policy" content="' + policy + '">' + previewSource;
+    $('preview').append(frame);
+  }
+  $('preview-toggle').onclick = () => showPreview(!$('preview').childElementCount);
+
   function assets(data) {
+    const source = data.files?.['index.html'];
+    $('preview-toggle').hidden = typeof source !== 'string';
+    if (source !== previewSource) {
+      previewSource = source;
+      showPreview(typeof source === 'string' && !!$('preview').childElementCount);
+    }
     $('files').replaceChildren();
     for (const [name, content] of Object.entries(data.files || {})) {
       const button = document.createElement('button');
@@ -163,17 +346,103 @@
     $('downloads').hidden = !$('files').childElementCount;
   }
 
-  function showTrace(steps = []) {
+  const traceEntries = new Map();
+  const statusLabels = {running:'运行中', waiting:'等待中', ok:'成功', error:'失败', unconfirmed:'结果未确认'};
+
+  function pendingEvent(event) {
+    return event.status === 'running' || event.status === 'waiting';
+  }
+
+  function clearTrace() {
+    traceEntries.clear();
     $('trace').replaceChildren();
-    for (const [role, action, result] of steps) {
-      const item = document.createElement('li');
-      const heading = document.createElement('strong');
-      const detail = document.createElement('p');
-      heading.textContent = role + ' · ' + action;
-      detail.textContent = result;
-      item.append(heading, detail);
-      $('trace').append(item);
+    $('trace-empty').textContent = '当前会话暂无运行轨迹。';
+    $('trace-empty').hidden = false;
+  }
+
+  function createTraceEntry(event) {
+    const item = document.createElement('li');
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    const title = document.createElement('strong');
+    const status = document.createElement('span');
+    const model = event.kind === 'model';
+    details.className = model ? 'model-event' : 'tool-event';
+    title.textContent = '调用 #' + event.call_id + ' · ' + event.role + ' · ' +
+      (model ? '模型' : '工具') + ' · ' + event.name;
+    summary.append(title, status);
+    details.append(summary);
+    const inputLabel = document.createElement('h3');
+    const input = document.createElement('pre');
+    const outputLabel = document.createElement('h3');
+    const output = document.createElement('pre');
+    inputLabel.textContent = model ? '输入 · Ollama 请求体' : '输入 · 工具参数';
+    details.append(inputLabel, input, outputLabel, output);
+    item.append(details);
+    if (!traceEntries.size) $('trace').replaceChildren(); // 从旧摘要切到详细轨迹
+    $('trace').append(item);
+    $('trace-empty').hidden = true;
+    return {event:{}, status, input, outputLabel, output};
+  }
+
+  function updateTraceEntry(patch, used) {
+    let key = patch.id;
+    let record = traceEntries.get(key);
+    // 旧快照没有 id，同一次调用也可以多次执行同名工具。按出现次序逐个配对。
+    if (!record) {
+      for (const [oldKey, candidate] of traceEntries) {
+        const old = candidate.event;
+        if ((!old.id || !patch.id) && !used?.has(candidate) && old.kind === patch.kind &&
+            old.call_id === patch.call_id && old.role === patch.role && old.name === patch.name) {
+          record = candidate;
+          if (key && key !== oldKey) traceEntries.delete(oldKey);
+          key ??= oldKey;
+          break;
+        }
+      }
     }
+    if (!record) record = createTraceEntry(patch);
+    traceEntries.set(key ?? Symbol(), record);
+    used?.add(record);
+    const event = Object.assign(record.event, patch);
+    record.status.className = 'event-' + event.status;
+    record.status.textContent = statusLabels[event.status] || '状态未知';
+    record.outputLabel.textContent = event.status === 'error' ? '输出 · 错误' :
+      event.kind === 'model' ? '输出 · Ollama 响应' : '输出 · 工具结果';
+    if ('request' in patch || !record.input.textContent)
+      record.input.textContent = JSON.stringify(event.request, null, 2) ?? '暂无输入记录';
+    if ('response' in patch || !('response' in event))
+      record.output.textContent = JSON.stringify(event.response, null, 2) ?? (pendingEvent(event) ? '等待返回' : '暂无输出记录');
+  }
+
+  function markUnconfirmed() {
+    for (const record of traceEntries.values()) {
+      if (pendingEvent(record.event)) {
+        record.event.status = 'unconfirmed';
+        record.status.textContent = statusLabels.unconfirmed;
+        record.status.className = 'event-unconfirmed';
+        if (!('response' in record.event)) record.output.textContent = '未收到调用结果';
+      }
+    }
+  }
+
+  function showTrace({events, trace = [], turns} = {}) {
+    if (events?.length) {
+      const used = new Set();
+      for (const event of events) updateTraceEntry(event, used);
+    } else if (!traceEntries.size && trace.length) {
+      $('trace').replaceChildren();
+      for (const [role, action, result] of trace) {
+        const item = document.createElement('li');
+        const heading = document.createElement('strong');
+        const detail = document.createElement('p');
+        heading.textContent = role + ' · ' + action;
+        detail.textContent = result;
+        item.append(heading, detail);
+        $('trace').append(item);
+      }
+    }
+    $('trace-empty').textContent = turns?.length ? '这段历史会话没有保存运行轨迹。' : '当前会话暂无运行轨迹。';
     $('trace-empty').hidden = !!$('trace').childElementCount;
   }
 
@@ -209,26 +478,176 @@
     }
   }
 
-  async function finish(data) {
-    // 网页只自动确认后端现有的会话文件写入，不改变工具权限。
-    while (data.approval) {
-      $('status').textContent = '正在写入会话文件…';
-      data = await request('/approve', {allow:true});
-    }
-    if (data.reply) entry('助手', data.reply);
+  function finish(data) {
     assets(data);
-    showTrace(data.trace);
+    showTrace(data);
+    markUnconfirmed();
     if (!$('conversation').hidden) $('scroll').scrollTop = $('scroll').scrollHeight;
-    $('status').textContent = data.status === 'stopped' ? '任务已停止' : '';
+    $('status').textContent = data.status === 'failed' ? '请求失败，可在轨迹中查看详情。' :
+      data.status === 'stopped' ? '任务已停止' : '';
+  }
+
+  function describeStep(event, steps, streaming) {
+    const actor = event.role === '子' ? '子助手' : '我';
+    const label = value => String(value ?? '').replace(/\s+/g, ' ').slice(0, 72);
+    if (event.kind === 'model') {
+      if (event.status === 'error') return actor + '暂时无法继续回答，详情见轨迹。';
+      if (streaming) return actor + '正在回答你…';
+      const lastTool = steps.filter(step => step.kind === 'tool' && step.role === event.role &&
+        step.status === 'ok' && step.call_id < event.call_id).at(-1);
+      const searched = ['search', 'web_search'].includes(lastTool?.name);
+      if (event.status === 'running' && event.phase === 'thinking') {
+        if (searched) return actor + '正在结合搜索结果思考怎么回答…';
+        if (lastTool) return actor + '正在根据刚才的结果思考下一步…';
+        return actor + '正在思考怎么回答…';
+      }
+      if (searched) return actor + '正在整理搜索结果…';
+      if (lastTool) return actor + '正在结合刚才的结果继续处理…';
+      return actor + '正在看你的问题…';
+    }
+    const args = event.request || {};
+    if (event.status === 'waiting') return '「' + label(args.name) + '」正在等待保存。';
+    const verb = event.status === 'ok' ? '已' : '正在';
+    const suffix = event.status === 'ok' ? '。' : '…';
+    const file = '「' + label(args.path || args.name || args.file) + '」';
+    let action;
+    switch (event.name) {
+      case 'search': case 'web_search': action = '搜索「' + label(args.query) + '」'; break;
+      case 'read_text_file': case 'read': action = '读取' + file; break;
+      case 'write_file': case 'write': action = '写入' + file; break;
+      case 'list_directory': case 'list': action = '查看会话文件'; break;
+      case 'command': action = '统计「' + label(args.file) + '」的词数'; break;
+      case 'delegate': action = '委派子任务「' + label(args.task) + '」'; break;
+      default: action = '执行 ' + label(event.name);
+    }
+    if (event.status === 'error') return action + '失败，详情见轨迹。';
+    return actor + verb + action + suffix;
+  }
+
+  function showActions(row, events = []) {
+    const actions = (events || []).filter(event => event.kind === 'tool');
+    if (!actions.length) return;
+    const details = document.createElement('details');
+    details.className = 'actions';
+    const summary = document.createElement('summary');
+    summary.textContent = '查看 ' + actions.length + ' 项操作';
+    const list = document.createElement('ol');
+    for (const event of actions) {
+      const item = document.createElement('li');
+      item.textContent = describeStep(event, [], false);
+      list.append(item);
+    }
+    details.append(summary, list);
+    row.append(details);
+  }
+
+  async function streamReply(path, body) {
+    if (path === '/chat') clearTrace();
+    const row = entry('助手', '');
+    const content = row.querySelector('p');
+    const text = document.createTextNode('');
+    const activity = document.createElement('small');
+    activity.className = 'chat-activity';
+    activity.setAttribute('role', 'status');
+    const elapsed = document.createElement('small');
+    elapsed.className = 'elapsed';
+    elapsed.setAttribute('aria-hidden', 'true');
+    row.append(activity, elapsed);
+    const started = performance.now();
+    const timer = setInterval(() => {
+      elapsed.textContent = '本轮已用 ' + Math.floor((performance.now() - started) / 1000) + ' 秒';
+    }, 1000);
+    const dots = document.createElement('span');
+    dots.className = 'waiting-dots';
+    dots.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 3; i++) dots.append(document.createElement('i'));
+
+    function waitForModel() {
+      text.data = '';
+      row.classList.add('waiting');
+      content.replaceChildren(dots);
+    }
+    function showActivity() {
+      const steps = Array.from(traceEntries.values(), item => item.event);
+      const event = steps.filter(pendingEvent).at(-1) || steps.at(-1);
+      const description = event ? '第 ' + (steps.indexOf(event) + 1) + ' 步 · ' +
+        describeStep(event, steps, !row.classList.contains('waiting')) :
+        (path === '/approve' ? '正在确认文件写入…' : '正在发送你的消息…');
+      // 工具前若有助手公开说明，就与实际动作一起显示。
+      const message = event?.kind === 'tool'
+        && steps.find(step => step.kind === 'model' && step.call_id === event.call_id)?.response?.message;
+      const note = message?.tool_calls?.length && typeof message.content === 'string' ? message.content.trim() : '';
+      const caption = note ? description + ' ' + note.slice(0, 160) : description;
+      if (activity.textContent !== caption) activity.textContent = caption;
+    }
+
+    function onFrame(frame) {
+      if (frame.type === 'activity') {
+        updateTraceEntry(frame.event);
+        showActivity();
+        return;
+      }
+      if (frame.type === 'reset') {
+        waitForModel();
+        return;
+      }
+      const scroll = $('scroll');
+      const follow = !$('conversation').hidden && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48;
+      if (row.classList.contains('waiting')) {
+        row.classList.remove('waiting');
+        content.replaceChildren(text);
+        showActivity();
+      }
+      text.appendData(frame.text);
+      if (follow) scroll.scrollTop = scroll.scrollHeight;
+    }
+
+    try {
+      let data;
+      do {
+        waitForModel();
+        showActivity();
+        if (path === '/approve') $('status').textContent = '正在写入会话文件…';
+        data = await request(path, body, onFrame);
+        if (data.approval) showTrace(data);
+        // 后端的会话文件写入审批可以多次挂起同一轮。
+        path = '/approve';
+        body = {allow:true};
+      } while (data.approval);
+      if (data.reply) {
+        showActions(row, data.events);
+        showUsage(row, data.usage);
+        row.classList.remove('waiting');
+        content.replaceWith(markdownReply(data.reply));
+      } else {
+        row.remove();
+      }
+      finish(data);
+    } catch (error) {
+      markUnconfirmed();
+      row.remove();
+      throw error;
+    } finally {
+      clearInterval(timer);
+      activity.remove();
+      elapsed.remove();
+    }
   }
 
   async function restore(name, id) {
     if (!/^[A-Za-z0-9_-]{1,60}$/.test(name)) throw new Error('工作区名请用 1 至 60 个英文字母、数字、下划线或短横线');
     menu(false);
     ready = false;
-    workspace = $('space').value = name;
     const key = prefix + 'session:' + name;
-    session = id || localStorage.getItem(key) || crypto.randomUUID();
+    const next = id || localStorage.getItem(key) || crypto.randomUUID();
+    if (session && (workspace !== name || session !== next)) {
+      saveDraft();
+      $('message').value = '';
+      composing = false;
+    }
+    workspace = $('space').value = name;
+    session = next;
+    if (!$('message').value && !composing) $('message').value = sessionStorage.getItem(draftKey()) || '';
     localStorage.setItem(key, session);
     localStorage.setItem(prefix + 'workspace', name);
     $('workspace-name').textContent = '工作区 / ' + name;
@@ -237,19 +656,23 @@
     $('list-note').textContent = '正在读取会话…';
     $('history').replaceChildren();
     $('empty').hidden = true;
-    $('message').value = '';
     assets({});
-    showTrace();
+    clearTrace();
     view(false);
     try {
       const data = await request('/session', {});
-      for (const [user, assistant] of data.turns) {
+      for (const [i, [user, assistant]] of data.turns.entries()) {
         entry('你', user);
-        entry('助手', assistant);
+        const row = entry('助手', assistant);
+        showActions(row, data.turn_actions?.[i]);
+        showUsage(row, data.turn_usage?.[i]);
       }
       if (data.pendingMessage) entry('你', data.pendingMessage);
       $('heading').textContent = data.turns[0]?.[0] || data.pendingMessage || '新会话';
-      await finish(data);
+      if (data.approval) {
+        showTrace(data);
+        await streamReply('/approve', {allow:true});
+      } else finish(data);
       $('empty').hidden = !!$('history').childElementCount;
       addChoice(name);
       ready = true;
@@ -267,6 +690,10 @@
   });
   $('show-chat').onclick = () => view(false);
   $('show-trace').onclick = () => view(true);
+  // 鼠标刷新模型时保留正在编辑的组合文本，键盘仍可 Tab 到按钮。
+  $('reload-models').onmousedown = event => {
+    if (event.button === 0 && document.activeElement === $('message')) event.preventDefault();
+  };
   $('reload-models').onclick = loadModels;
   $('model').onchange = () => {
     localStorage.setItem(prefix + 'model', $('model').value);
@@ -277,30 +704,54 @@
     run(() => restore($('space').value));
   };
   $('fresh').onclick = () => run(() => restore(workspace || 'default', crypto.randomUUID()));
-  $('message').oninput = controls;
+  $('message').oninput = updateSend;
+  $('message').addEventListener('compositionstart', () => {
+    composing = true;
+    updateSend();
+  });
+  $('message').addEventListener('compositionend', () => {
+    composing = false;
+    updateSend();
+  });
+  $('message').onblur = () => { composing = false; updateSend(); };
   $('composer').onsubmit = event => {
     event.preventDefault();
     const model = $('model').value;
     const message = $('message').value.trim();
-    if (busy || loadingModels || !ready || !model || !message) return;
+    if ($('send').disabled || composing || !message) return;
+    const draft = $('message').value;
+    const body = {message, model};
+    if ($('online').checked) {
+      body.online = true;
+      $('online').checked = false;
+    }
+    if (document.activeElement === $('send')) $('message').focus({preventScroll:true});
     run(async () => {
-      view(false);
       if (!$('history').childElementCount) $('heading').textContent = message;
       $('message').value = '';
+      saveDraft();
       entry('你', message);
-      await finish(await request('/chat', {message, model}));
+      try {
+        await streamReply('/chat', body);
+      } catch (error) {
+        // 断线时保住刚发送的内容；用户已经在打下一条时保留新草稿。
+        if (!$('message').value && !composing) $('message').value = draft;
+        saveDraft();
+        throw error;
+      }
       await listSessions();
     });
   };
   $('example').onclick = () => {
     $('message').value = '写一个可以切换深浅色的单页网页。';
-    controls();
+    updateSend();
     $('message').focus();
   };
   $('message').onkeydown = event => {
-    if (!event.isComposing && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey &&
+        !composing && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault();
-      if (!$('send').disabled) $('composer').requestSubmit();
+      if (!event.repeat && !$('send').disabled) $('composer').requestSubmit();
     }
   };
   loadModels();

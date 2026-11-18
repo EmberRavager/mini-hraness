@@ -3,9 +3,10 @@ import argparse
 import http.client
 import json
 from contextlib import closing
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from session_layer import dispatch
+from tool_registry import DEFAULT_CONFIG
 
 
 def installed_models():
@@ -51,6 +52,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.local():
             return self.send({}, 403)
+        if self.path == '/health':
+            return self.send(dict(status='ok'))
         if self.path == '/info':
             root = self.server.root
             return self.send(dict(root=str(root), workspaces=sorted(p.name for p in root.iterdir()
@@ -67,6 +70,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.send({}, 403)
         if self.path not in ('/chat', '/approve', '/session', '/sessions'):
             return self.send({}, 404)
+        streaming = False
+        connected = True
+        def emit(event):
+            # 刷新页面只断开订阅，已经执行过的工具仍需写回本轮会话。
+            nonlocal connected
+            if connected:
+                try:
+                    self.wfile.write((json.dumps(event, ensure_ascii=False) + '\n').encode())
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    connected = False
         try:
             size = int(self.headers.get('Content-Length', '0'))
             if self.headers.get_content_type() != 'application/json' or not 0 < size <= 128000:
@@ -79,11 +93,43 @@ class Handler(BaseHTTPRequestHandler):
                 selected = body['model']
                 if not isinstance(selected, str) or selected not in installed_models():
                     raise ValueError('所选模型不在 Ollama 列表中，请刷新模型列表')
-            self.send(dispatch(self.server.root, self.path, body, self.server.model, model_name=selected))
+            streaming = (self.path in ('/chat', '/approve') and
+                         self.headers.get('Accept') == 'application/x-ndjson')
+            if streaming:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+            result = dispatch(self.server.root, self.path, body, self.server.model, model_name=selected,
+                              emit=emit if streaming else None, tool_config=vars(self.server).get('tool_config'))
+            if streaming:
+                emit(dict(type='result', data=result))
+            else:
+                self.send(result)
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except ValueError as error:
-            self.send(dict(error=str(error)), 400)
+            if streaming:
+                emit(dict(type='error', error=str(error)))
+            else:
+                self.send(dict(error=str(error)), 400)
         except (OSError, KeyError, http.client.HTTPException) as error:
-            self.send(dict(error=f'本地模型或工作目录异常：{error}'), 502)
+            detail = f'本地模型或工作目录异常：{error}'
+            if streaming:
+                emit(dict(type='error', error=detail))
+            else:
+                self.send(dict(error=detail), 502)
+
+
+def create_server(root, port, model_name, model, tool_config=None):
+    root = root.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    server.root = root
+    server.default_model = model_name
+    server.tool_config = tool_config
+    server.model = model
+    return server
 
 
 if __name__ == '__main__':
@@ -91,12 +137,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', required=True)
     parser.add_argument('--workspace', type=Path, default=Path('.mini-harness/workspaces'))
+    parser.add_argument('--tools', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
-    with HTTPServer(('127.0.0.1', args.port), Handler) as server:
-        server.root = args.workspace.expanduser().resolve()
-        server.root.mkdir(parents=True, exist_ok=True)
-        server.default_model = args.model
-        server.model = chat
+    with create_server(args.workspace, args.port, args.model, chat, args.tools) as server:
         print(f'API：http://127.0.0.1:{server.server_port}   工作目录：{server.root}', flush=True)
         server.serve_forever()

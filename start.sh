@@ -4,6 +4,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$here/.env.example"
 
 case "${1-}" in
+    --setup) exec "$here/external-tools/install.sh" ;;
     --app)
         shift
         if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || [ "$1" != --workspace ]; }; then
@@ -34,4 +35,4 @@ esac
 for arg do
     if [ "$arg" = --resume ]; then exec python3 "$here/cli.py" "$@"; fi
 done
-exec python3 "$here/cli.py" --model "$OLLAMA_MODEL" "$@"
+exec python3 "$here/cli.py" --model "$OLLAMA_MODEL" --tools "$here/tools.json" "$@"
